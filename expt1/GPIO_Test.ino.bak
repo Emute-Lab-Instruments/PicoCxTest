@@ -1,0 +1,75 @@
+// Diagnostic Test - Tests TX and RX separately with known patterns
+#include <hardware/pio.h>
+#include <hardware/gpio.h>
+
+constexpr size_t TX_DATA_PIN = 0;
+constexpr size_t RX_DATA_PIN = 3;
+
+// Core 0: Transmit known patterns
+void setup() {
+  Serial.begin(115200);
+  delay(3000);
+
+  Serial.println("\n=== CORE 0: TRANSMIT TEST ===");
+  Serial.println("Wiring: GPIO 0 -> GPIO 3");
+  Serial.println();
+
+  gpio_init(TX_DATA_PIN);
+  gpio_set_dir(TX_DATA_PIN, GPIO_OUT);
+
+  Serial.println("Test 1: Sending alternating HIGH/LOW at 2 Hz");
+  Serial.println("Watch for pattern on RX (Core 1)...");
+}
+
+uint8_t pattern_index = 0;
+uint8_t patterns[] = {0x00, 0xFF, 0xAA, 0x55, 0xF0, 0x0F};
+const char* pattern_names[] = {"0x00 (all zeros)", "0xFF (all ones)", "0xAA (10101010)",
+                                "0x55 (01010101)", "0xF0 (11110000)", "0x0F (00001111)"};
+
+void loop() {
+  // Send 8 bits slowly
+  uint8_t pattern = patterns[pattern_index];
+
+  Serial.print("\nCore 0 TX: Sending ");
+  Serial.println(pattern_names[pattern_index]);
+
+  for (int bit = 0; bit < 8; bit++) {
+    bool value = (pattern >> bit) & 0x01;
+    gpio_put(TX_DATA_PIN, value);
+    delay(500); // 500ms per bit - very slow
+  }
+
+  pattern_index = (pattern_index + 1) % 6;
+  delay(1000);
+}
+
+// Core 1: Receive and report
+void setup1() {
+  delay(4000);
+
+  Serial.println("\n=== CORE 1: RECEIVE TEST ===");
+
+  gpio_init(RX_DATA_PIN);
+  gpio_set_dir(RX_DATA_PIN, GPIO_IN);
+
+  Serial.println("Sampling GPIO 3 and reporting...");
+}
+
+uint32_t sample_count = 0;
+uint8_t last_value = 2; // Invalid initial value
+
+void loop1() {
+  uint8_t value = gpio_get(RX_DATA_PIN);
+
+  // Report on changes or every 10 samples
+  if (value != last_value || sample_count % 10 == 0) {
+    Serial.print("Core 1 RX [");
+    Serial.print(sample_count);
+    Serial.print("]: GPIO 3 = ");
+    Serial.println(value);
+    last_value = value;
+  }
+
+  sample_count++;
+  delay(100); // Sample every 100ms
+}

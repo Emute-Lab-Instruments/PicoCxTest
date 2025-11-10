@@ -1,0 +1,43 @@
+; PIO RX Program - Receives 6-byte packets with frame detection
+; Waits for frame HIGH, reads 6 bytes, waits for frame LOW
+; IN pin = data signal (configured via sm_config_set_in_pins)
+; Frame signal on GPIO 5 (absolute GPIO)
+; Autopush enabled, threshold 8 bits
+
+.program piocx_rx
+
+.wrap_target
+    wait 1 gpio 5       ; Wait for frame HIGH (start of message)
+    set x, 6            ; Counter for 6 bytes (jmp x-- gives x iterations)
+
+byteloop:
+    set y, 8            ; Counter for 8 bits (jmp y-- gives y iterations)
+bitloop:
+    in pins, 1          ; Read one bit
+    jmp y-- bitloop     ; Decrement Y and loop if not zero
+
+    jmp x-- byteloop    ; Decrement X and loop for next byte
+
+    wait 0 gpio 5       ; Wait for frame LOW (end of message)
+.wrap
+
+% c-sdk {
+static inline void piocx_rx_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint frame_pin, float clk_div) {
+    // Set pins as inputs BEFORE pio_sm_init
+    pio_sm_set_pindirs_with_mask(pio, sm, 0, (1u << data_pin) | (1u << frame_pin));
+
+    // Hand pins to PIO control
+    pio_gpio_init(pio, data_pin);
+    pio_gpio_init(pio, frame_pin);
+
+    // Build config
+    pio_sm_config c = piocx_rx_program_get_default_config(offset);
+    sm_config_set_in_shift(&c, true, true, 8);  // LSB first, autopush at 8 bits
+    sm_config_set_in_pins(&c, data_pin);
+    sm_config_set_clkdiv(&c, clk_div);
+
+    // Initialize and enable
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}

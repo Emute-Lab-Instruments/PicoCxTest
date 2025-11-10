@@ -1,0 +1,394 @@
+#include <hardware/pio.h>
+#include <hardware/dma.h>
+#include <hardware/irq.h>
+#include "piocx_tx.pio.h"
+#include "piocx_rx.pio.h"
+
+// Pin definitions
+constexpr size_t TX_DATA_PIN = 0;
+constexpr size_t TX_FRAME_PIN = 2;
+constexpr size_t RX_DATA_PIN = 3;
+constexpr size_t RX_FRAME_PIN = 5;
+
+// Protocol settings
+constexpr float BIT_RATE = 4000000.0f; // 4 MHz
+constexpr size_t MESSAGE_SIZE = 5;     // 5 bytes per message
+constexpr size_t PACKET_SIZE = 6;      // 5 bytes + 1 checksum
+constexpr size_t TX_BUFFER_SIZE = 8;   // Circular buffer for TX
+
+// Message types
+enum MESSAGETYPES {BASEFREQ, BANK, SPREAD, OCTAVE};
+
+// Message structure (5 bytes)
+struct __attribute__((packed)) message {
+  uint8_t messageType;
+  union {
+    size_t dataInt;
+    float dataFloat;
+  } data;
+};
+
+// Packet structure (6 bytes: 5 data + 1 checksum)
+struct __attribute__((packed)) packet {
+  uint8_t data[MESSAGE_SIZE];
+  uint8_t checksum;
+
+  void calculateChecksum() {
+    checksum = 0;
+    for (size_t i = 0; i < MESSAGE_SIZE; i++) {
+      checksum ^= data[i];
+    }
+  }
+
+  bool validateChecksum() const {
+    uint8_t calc = 0;
+    for (size_t i = 0; i < MESSAGE_SIZE; i++) {
+      calc ^= data[i];
+    }
+    return calc == checksum;
+  }
+};
+
+// ========== TRANSMIT SIDE (Core 0) ==========
+PIO tx_pio = pio0;
+uint tx_sm;
+int tx_dma_chan;
+packet tx_buffer[TX_BUFFER_SIZE];
+uint32_t tx_dma_buffer[TX_BUFFER_SIZE][PACKET_SIZE]; // 32-bit words for DMA
+volatile size_t tx_write_idx = 0;
+volatile size_t tx_read_idx = 0;
+volatile bool tx_dma_busy = false;
+volatile uint32_t tx_dma_irq_count = 0; // DEBUG
+
+// DMA interrupt handler - triggers when a packet is fully sent
+void __isr dma_tx_complete_handler() {
+  dma_hw->ints0 = 1u << tx_dma_chan; // Clear interrupt
+  tx_dma_irq_count++; // DEBUG
+
+  tx_read_idx = (tx_read_idx + 1) % TX_BUFFER_SIZE;
+
+  // Check if more packets to send
+  if (tx_read_idx != tx_write_idx) {
+    // Restart DMA with new buffer and count
+    dma_channel_hw_addr(tx_dma_chan)->read_addr = (uint32_t)&tx_dma_buffer[tx_read_idx][0];
+    dma_channel_hw_addr(tx_dma_chan)->transfer_count = PACKET_SIZE;
+    dma_channel_hw_addr(tx_dma_chan)->ctrl_trig = dma_channel_hw_addr(tx_dma_chan)->ctrl_trig;
+  } else {
+    tx_dma_busy = false;
+  }
+}
+
+void setupTransmit() {
+  // Load PIO program
+  uint offset = pio_add_program(tx_pio, &piocx_tx_program);
+  tx_sm = pio_claim_unused_sm(tx_pio, true);
+
+  // Calculate clock divider for bit rate
+  // Loop takes 2 cycles per bit (out + jmp), so divide by 2
+  float clk_div = clock_get_hz(clk_sys) / BIT_RATE / 2.0f;
+
+  // Initialize PIO
+  piocx_tx_program_init(tx_pio, tx_sm, offset, TX_DATA_PIN, TX_FRAME_PIN, clk_div);
+
+  // Setup DMA
+  tx_dma_chan = dma_claim_unused_channel(true);
+  dma_channel_config c = dma_channel_get_default_config(tx_dma_chan);
+  channel_config_set_transfer_data_size(&c, DMA_SIZE_32); // 32-bit transfers (FIX!)
+  channel_config_set_read_increment(&c, true);            // Increment read address
+  channel_config_set_write_increment(&c, false);          // Always write to PIO FIFO
+  channel_config_set_dreq(&c, pio_get_dreq(tx_pio, tx_sm, true)); // Paced by PIO TX FIFO
+
+  dma_channel_configure(
+    tx_dma_chan,
+    &c,
+    &tx_pio->txf[tx_sm],  // Write to PIO TX FIFO
+    NULL,                  // Read address set when transfer starts
+    PACKET_SIZE,          // Transfer 6 words (one per byte)
+    false                 // Don't start yet
+  );
+
+  // Enable DMA interrupt
+  dma_channel_set_irq0_enabled(tx_dma_chan, true);
+  irq_set_exclusive_handler(DMA_IRQ_0, dma_tx_complete_handler);
+  irq_set_enabled(DMA_IRQ_0, true);
+}
+
+bool sendMessage(const message& msg) {
+  size_t next_write = (tx_write_idx + 1) % TX_BUFFER_SIZE;
+
+  // Check if buffer full
+  if (next_write == tx_read_idx && tx_dma_busy) {
+    return false; // Buffer full
+  }
+
+  // Copy message to packet and calculate checksum
+  memcpy(tx_buffer[tx_write_idx].data, &msg, MESSAGE_SIZE);
+  tx_buffer[tx_write_idx].calculateChecksum();
+
+  // Convert packet bytes to 32-bit words for DMA
+  uint8_t* packet_bytes = (uint8_t*)&tx_buffer[tx_write_idx];
+  for (size_t i = 0; i < PACKET_SIZE; i++) {
+    tx_dma_buffer[tx_write_idx][i] = packet_bytes[i]; // Byte in lower 8 bits
+  }
+
+  // DEBUG: Print first message buffer contents
+  static bool first_print = true;
+  if (first_print) {
+    first_print = false;
+    Serial.println("\n=== DEBUG: First message ===");
+    Serial.print("tx_buffer bytes: ");
+    for (int i = 0; i < PACKET_SIZE; i++) {
+      Serial.print("0x");
+      if (packet_bytes[i] < 0x10) Serial.print("0");
+      Serial.print(packet_bytes[i], HEX);
+      Serial.print(" ");
+    }
+    Serial.println();
+    Serial.print("tx_dma_buffer 32-bit words: ");
+    for (int i = 0; i < PACKET_SIZE; i++) {
+      Serial.print("0x");
+      Serial.print(tx_dma_buffer[tx_write_idx][i], HEX);
+      Serial.print(" ");
+    }
+    Serial.println("\n");
+  }
+
+  tx_write_idx = next_write;
+
+  // Start DMA if not already running
+  if (!tx_dma_busy) {
+    tx_dma_busy = true;
+    tx_read_idx = (tx_write_idx - 1 + TX_BUFFER_SIZE) % TX_BUFFER_SIZE;
+    // Manually set address and count, then trigger
+    dma_channel_hw_addr(tx_dma_chan)->read_addr = (uint32_t)&tx_dma_buffer[tx_read_idx][0];
+    dma_channel_hw_addr(tx_dma_chan)->transfer_count = PACKET_SIZE;
+    dma_channel_hw_addr(tx_dma_chan)->ctrl_trig = dma_channel_hw_addr(tx_dma_chan)->ctrl_trig;
+  }
+
+  return true;
+}
+
+bool sendFloatMessage(MESSAGETYPES msgType, float value) {
+  message msg;
+  msg.messageType = static_cast<uint8_t>(msgType);
+  msg.data.dataFloat = value;
+
+  if (!sendMessage(msg)) {
+    Serial.println("TX buffer full!");
+    return false;
+  }
+  return true;
+}
+
+// ========== RECEIVE SIDE (Core 1) ==========
+PIO rx_pio = pio1;
+uint rx_sm;
+packet rx_buffer;
+volatile size_t rx_byte_count = 0;
+volatile bool rx_packet_ready = false;
+volatile uint32_t rx_count = 0;
+volatile uint32_t rx_error_count = 0;
+volatile uint32_t rx_isr_count = 0;  // Count interrupt calls
+
+// PIO RX interrupt handler - fires when byte received
+void __isr pio_rx_handler() {
+  rx_isr_count++;
+
+  // Read byte from FIFO
+  if (!pio_sm_is_rx_fifo_empty(rx_pio, rx_sm)) {
+    size_t count = rx_byte_count;
+    rx_buffer.data[count] = pio_sm_get(rx_pio, rx_sm) & 0xFF;
+    count++;
+
+    if (count >= PACKET_SIZE) {
+      rx_packet_ready = true;
+      rx_byte_count = 0;
+    } else {
+      rx_byte_count = count;
+    }
+  }
+
+  // Clear interrupt
+  irq_clear(PIO1_IRQ_0);
+}
+
+void setupReceive() {
+  // Load PIO program
+  uint offset = pio_add_program(rx_pio, &piocx_rx_program);
+  rx_sm = pio_claim_unused_sm(rx_pio, true);
+
+  // Calculate clock divider (match TX)
+  // Loop takes 2 cycles per bit (in + jmp), so divide by 2
+  float clk_div = clock_get_hz(clk_sys) / BIT_RATE / 2.0f;
+
+  // Initialize PIO
+  piocx_rx_program_init(rx_pio, rx_sm, offset, RX_DATA_PIN, RX_FRAME_PIN, clk_div);
+
+  // Enable PIO interrupt when FIFO has data
+  pio_interrupt_source_t irq_source = (pio_interrupt_source_t)(pis_sm0_rx_fifo_not_empty + rx_sm);
+  pio_set_irq0_source_enabled(rx_pio, irq_source, true);
+  irq_set_exclusive_handler(PIO1_IRQ_0, pio_rx_handler);
+  irq_set_enabled(PIO1_IRQ_0, true);
+}
+
+void processReceivedPacket() {
+  if (!rx_packet_ready) return;
+
+  // Validate checksum
+  if (rx_buffer.validateChecksum()) {
+    message* msg = reinterpret_cast<message*>(rx_buffer.data);
+
+    // Process message
+    uint32_t count = rx_count + 1;
+    rx_count = count;
+
+    // Print every 10th message to reduce serial congestion
+    if (count % 10 == 0) {
+      Serial.print("RX #");
+      Serial.print(count);
+      Serial.print(" Type: ");
+      Serial.print(msg->messageType);
+      Serial.print(" Float: ");
+      Serial.print(msg->data.dataFloat, 4);
+
+      // Also print raw bytes for debugging
+      Serial.print(" [Raw: ");
+      for (int i = 0; i < 5; i++) {
+        if (rx_buffer.data[i] < 0x10) Serial.print("0");
+        Serial.print(rx_buffer.data[i], HEX);
+        Serial.print(" ");
+      }
+      Serial.println("]");
+    }
+  } else {
+    uint32_t err_count = rx_error_count + 1;
+    rx_error_count = err_count;
+    Serial.print("Checksum error! (");
+    Serial.print(err_count);
+    Serial.println(" total errors)");
+  }
+
+  rx_packet_ready = false;
+}
+
+// ========== CORE 0 SETUP/LOOP ==========
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) {} // Wait for serial connection
+  delay(500);
+
+  Serial.println("\n\n=== PIOCx Test Starting ===");
+  Serial.println("Core 0: TX Setup");
+  Serial.print("System Clock: ");
+  Serial.print(clock_get_hz(clk_sys) / 1000000.0f);
+  Serial.println(" MHz");
+
+  Serial.print("Message size: ");
+  Serial.print(sizeof(message));
+  Serial.print(" bytes, Packet size: ");
+  Serial.print(sizeof(packet));
+  Serial.println(" bytes");
+
+  Serial.println("Setting up transmit...");
+  setupTransmit();
+  Serial.println("TX initialized successfully");
+  Serial.print("TX DMA Channel: ");
+  Serial.println(tx_dma_chan);
+  Serial.print("TX State Machine: ");
+  Serial.println(tx_sm);
+
+  // DEBUG: Print DMA configuration
+  Serial.print("PIO TX FIFO address: 0x");
+  Serial.println((uint32_t)&tx_pio->txf[tx_sm], HEX);
+  Serial.print("DMA write address: 0x");
+  Serial.println((uint32_t)dma_channel_hw_addr(tx_dma_chan)->write_addr, HEX);
+  Serial.print("DMA read address: 0x");
+  Serial.println((uint32_t)dma_channel_hw_addr(tx_dma_chan)->read_addr, HEX);
+  Serial.print("DMA transfer count: ");
+  Serial.println(dma_channel_hw_addr(tx_dma_chan)->transfer_count);
+  Serial.println();
+}
+
+float testval = 0.0;
+uint32_t tx_message_count = 0;
+void loop() {
+  if (sendFloatMessage(MESSAGETYPES::BASEFREQ, testval)) {
+    tx_message_count++;
+
+    // Print every 10th message with buffer contents
+    if (tx_message_count % 10 == 0) {
+      Serial.print("TX #");
+      Serial.print(tx_message_count);
+      Serial.print(" Value: ");
+      Serial.print(testval, 4);
+
+      // Show what's in the DMA buffer for this message
+      size_t idx = (tx_write_idx - 1 + TX_BUFFER_SIZE) % TX_BUFFER_SIZE;
+      Serial.print(" [DMA buf: ");
+      for (int i = 0; i < 6; i++) {
+        if (tx_dma_buffer[idx][i] < 0x10) Serial.print("0");
+        Serial.print(tx_dma_buffer[idx][i], HEX);
+        Serial.print(" ");
+      }
+      Serial.print("] IRQs:");
+      Serial.print(tx_dma_irq_count);
+
+      // Check PIO FIFO status
+      Serial.print(" FIFO:");
+      Serial.print(pio_sm_get_tx_fifo_level(tx_pio, tx_sm));
+      Serial.print(" Stalled:");
+      Serial.println(pio_sm_is_tx_fifo_empty(tx_pio, tx_sm) ? "Y" : "N");
+    }
+  }
+  testval += 0.11;
+  delay(33); // ~30 messages/sec
+}
+
+// ========== CORE 1 SETUP/LOOP ==========
+void setup1() {
+  delay(4000); // Wait for core 0 serial init
+
+  Serial.println("\nCore 1: RX Setup");
+  Serial.println("Setting up receive...");
+  setupReceive();
+  Serial.println("RX initialized successfully");
+  Serial.print("RX State Machine: ");
+  Serial.println(rx_sm);
+  Serial.println("Waiting for messages...\n");
+}
+
+uint32_t last_isr_count = 0;
+uint32_t rx_debug_timer = 0;
+
+void loop1() {
+  processReceivedPacket();
+
+  // Print debug info every 5 seconds
+  if (millis() - rx_debug_timer > 5000) {
+    rx_debug_timer = millis();
+
+    Serial.println("\n--- RX Debug ---");
+    Serial.print("ISR calls: ");
+    Serial.print(rx_isr_count);
+    Serial.print(" (delta: ");
+    Serial.print(rx_isr_count - last_isr_count);
+    Serial.println(")");
+    last_isr_count = rx_isr_count;
+
+    Serial.print("FIFO level: ");
+    Serial.println(pio_sm_get_rx_fifo_level(rx_pio, rx_sm));
+
+    Serial.print("RX FIFO empty: ");
+    Serial.println(pio_sm_is_rx_fifo_empty(rx_pio, rx_sm) ? "YES" : "NO");
+
+    Serial.print("Packets received: ");
+    Serial.println(rx_count);
+
+    Serial.print("Errors: ");
+    Serial.println(rx_error_count);
+
+    Serial.print("Partial byte count: ");
+    Serial.println(rx_byte_count);
+    Serial.println("----------------\n");
+  }
+}
