@@ -69,13 +69,6 @@ static inline void stream_tx_program_init(PIO pio, uint sm, uint offset, uint pi
     pio_sm_init(pio, sm, offset, &c);
     pio_sm_set_enabled(pio, sm, true);
 }
-static inline void stream_tx_program_putc(PIO pio, uint sm, char c) {
-    pio_sm_put_blocking(pio, sm, (uint32_t)c);
-}
-static inline void stream_tx_program_puts(PIO pio, uint sm, const char *s) {
-    while (*s)
-        uart_tx_program_putc(pio, sm, *s++);
-}
 
 #endif
 

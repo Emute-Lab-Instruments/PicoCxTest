@@ -71,13 +71,6 @@ static inline void stream_rx_program_init(PIO pio, uint sm, uint offset, uint pi
     pio_sm_init(pio, sm, offset, &c);
     pio_sm_set_enabled(pio, sm, true);
 }
-static inline char stream_rx_program_getc(PIO pio, uint sm) {
-    // 8-bit read from the uppermost byte of the FIFO, as data is left-justified
-    io_rw_8 *rxfifo_shift = (io_rw_8*)&pio->rxf[sm] + 3;
-    while (pio_sm_is_rx_fifo_empty(pio, sm))
-        tight_loop_contents();
-    return (char)*rxfifo_shift;
-}
 
 #endif
 

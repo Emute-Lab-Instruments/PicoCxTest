@@ -1,8 +1,6 @@
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "hardware/dma.h"
-#include "uart_tx.pio.h"
-#include "uart_rx.pio.h"
 #include "stream_tx.pio.h"
 #include "stream_rx.pio.h"
 #include "streamMessaging.hpp"
@@ -37,18 +35,6 @@ static void __not_in_flash_func(dma_irq_handler_tx)() {
     }
 }
 
-static void dump_bytes(const char *bptr, uint32_t len) {
-    unsigned int i = 0;
-    for (i = 0; i < len;) {
-        if ((i & 0x0f) == 0) {
-            printf("\n");
-        } else if ((i & 0x07) == 0) {
-            printf(" ");
-        }
-        printf("%02x ", bptr[i++]);
-    }
-    printf("\n");
-}
 
 void setup() 
 {
