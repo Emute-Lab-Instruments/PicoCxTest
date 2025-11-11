@@ -12,7 +12,7 @@ constexpr size_t TX_DATA_PIN = 2;
 constexpr size_t TX_FRAME_PIN = 3;
 constexpr size_t RX_DATA_PIN = 5;
 constexpr size_t RX_FRAME_PIN = 6;
-constexpr float BIT_RATE = 10000000.0f;
+constexpr float BIT_RATE = 20000000.0f;
 
 #define DMA_IRQ_PRIORITY PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY
 #define PIO_IRQ_PRIORITY PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY
@@ -33,7 +33,7 @@ dma_channel_config config_tx;
 static void __not_in_flash_func(dma_irq_handler_tx)() {
     if (dma_channel_tx >= 0 && dma_irqn_get_channel_status(0, dma_channel_tx)) {
         dma_irqn_acknowledge_channel(0, dma_channel_tx);
-        Serial.printf("dma_tx done\n");
+        // Serial.printf("dma_tx done\n");
     }
 }
 
@@ -79,19 +79,21 @@ void setup()
 
 
 float vf=0.0;
+size_t vu = 0;
 
 void loop() {
     streamMessaging::msgpacket m;
-    streamMessaging::createMessage(m, vf, streamMessaging::messageTypes::CTRL);
-    vf += 0.1f;
+    vu = rand();
+    streamMessaging::createMessage(m, vu, streamMessaging::messageTypes::CTRL);
+    // vf += 0.1f;
     dma_channel_configure(dma_channel_tx, &config_tx, &pioTx->txf[smTx], &m, 2, true); // dma started    
-	sleep_ms(100);
+	sleep_us(1000000/30000);
 }
 
 PIO pioRx;
 uint smRx;
 uint offsetRx;
-#define RX_BUFFER_SIZE 32
+#define RX_BUFFER_SIZE 64
 #define RX_BUFFER_SIZE_WORDS RX_BUFFER_SIZE / 4
 uint8_t rx_buffer_a[RX_BUFFER_SIZE] __attribute__((aligned(RX_BUFFER_SIZE)));
 uint8_t rx_buffer_b[RX_BUFFER_SIZE] __attribute__((aligned(RX_BUFFER_SIZE)));
@@ -165,6 +167,10 @@ void setup1() {
 
 }
 uint8_t lastRead=-1;
+size_t counter=0;
+const size_t checkevery=15000;
+size_t errorCount=0;
+size_t totalMessagesReceived=0;
 void loop1() {
     uint32_t remaining = dma_channel_hw_addr(current_rx_dma)->transfer_count;
     uint32_t current_dma_pos = (RX_BUFFER_SIZE_WORDS - remaining);
@@ -173,19 +179,25 @@ void loop1() {
         // Process new data
     while (current_dma_pos - last_dma_pos == 2) {
         streamMessaging::msgpacket *msg = reinterpret_cast<streamMessaging::msgpacket*>(&curr_rx_buffer[last_dma_pos]);
-        // size_t data = msg->word1;
-        // size_t data2 = msg->word2;
+        if (!streamMessaging::checksumIsOk(msg) || !streamMessaging::magicByteOk(msg)) {
+            errorCount++;
+        }
+        totalMessagesReceived++;
         last_dma_pos = last_dma_pos + 2;
-        Serial.printf("Received: %02f\t%d\t%02X\t%d\t%d\n", msg->value.floatValue, msg->msgType, msg->magicByte, streamMessaging::checksumIsOk(msg), streamMessaging::magicByteOk(msg) );
-        Serial.printf("%d %d %d %d\n", current_rx_dma, remaining, current_dma_pos, last_dma_pos);
+        if (counter++ == checkevery) {
+            Serial.printf("%d messages received, %d errors, %d total\n", checkevery, errorCount,totalMessagesReceived);
+            counter=0;
+            errorCount=0;
+        }
+        // Serial.printf("%d %d %d %d\n", current_rx_dma, remaining, current_dma_pos, last_dma_pos);
+        if (!remaining) {
+            //move to the other channel
+            current_rx_dma = current_rx_dma == dma_channel_rx_a ? dma_channel_rx_b : dma_channel_rx_a;
+            curr_rx_buffer = current_rx_dma == dma_channel_rx_a ? rx_buffer_a_word : rx_buffer_b_word;
+            last_dma_pos = 0;
+        }
     }
 
-    if (!remaining) {
-        //move to the other channel
-        current_rx_dma = current_rx_dma == dma_channel_rx_a ? dma_channel_rx_b : dma_channel_rx_a;
-        curr_rx_buffer = current_rx_dma == dma_channel_rx_a ? rx_buffer_a_word : rx_buffer_b_word;
-        last_dma_pos = 0;
-    }
 
-    delay(5);
+    // delay(5);
 }
