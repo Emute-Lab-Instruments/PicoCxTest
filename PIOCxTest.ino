@@ -3,6 +3,8 @@
 #include "hardware/dma.h"
 #include "uart_tx.pio.h"
 #include "uart_rx.pio.h"
+#include "stream_tx.pio.h"
+#include "stream_rx.pio.h"
 
 enum messageTypes {WAVELEN0, BANK0, BANK1, CTRL,
                 CTRL0, CTRL1, CTRL2, CTRL3, CTRL4, CTRL5, DETUNE, OCTSPREAD,
@@ -15,11 +17,11 @@ struct msg {
     uint16_t checksum;
 };
 
-constexpr size_t TX_DATA_PIN = 0;
-constexpr size_t TX_FRAME_PIN = 2;
-constexpr size_t RX_DATA_PIN = 3;
-constexpr size_t RX_FRAME_PIN = 5;
-constexpr float BIT_RATE = 1000000.0f;
+constexpr size_t TX_DATA_PIN = 2;
+constexpr size_t TX_FRAME_PIN = 3;
+constexpr size_t RX_DATA_PIN = 5;
+constexpr size_t RX_FRAME_PIN = 6;
+constexpr float BIT_RATE = 10000000.0f;
 
 #define DMA_IRQ_PRIORITY PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY
 #define PIO_IRQ_PRIORITY PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY
@@ -48,7 +50,7 @@ dma_channel_config config_tx;
 static void __not_in_flash_func(dma_irq_handler_tx)() {
     if (dma_channel_tx >= 0 && dma_irqn_get_channel_status(0, dma_channel_tx)) {
         dma_irqn_acknowledge_channel(0, dma_channel_tx);
-        // Serial.printf("dma_tx done\n");
+        Serial.printf("dma_tx done\n");
     }
 }
 
@@ -79,11 +81,15 @@ uint8_t v=0;
 void setup() 
 {
 	Serial.begin();
+    while(!Serial) {}
     // This will find a free pio and state machine for our program and load it for us
     // We use pio_claim_free_sm_and_add_program_for_gpio_range (for_gpio_range variant)
     // so we will get a PIO instance suitable for addressing gpios >= 32 if needed and supported by the hardware
-    bool success = pio_claim_free_sm_and_add_program_for_gpio_range(&uart_tx_program, &pioTx, &smTx, &offsetTx, TX_DATA_PIN, 1, true);
-    uart_tx_program_init(pioTx, smTx, offsetTx, TX_DATA_PIN, BIT_RATE);
+    // bool success = pio_claim_free_sm_and_add_program_for_gpio_range(&uart_tx_program, &pioTx, &smTx, &offsetTx, TX_DATA_PIN, 1, true);
+    // uart_tx_program_init(pioTx, smTx, offsetTx, TX_DATA_PIN, BIT_RATE);
+    bool success = pio_claim_free_sm_and_add_program_for_gpio_range(&stream_tx_program, &pioTx, &smTx, &offsetTx, TX_DATA_PIN, 2, true);
+    stream_tx_program_init(pioTx, smTx, offsetTx, TX_DATA_PIN, TX_FRAME_PIN, BIT_RATE);
+    Serial.printf("Tx prog: %d\n", success);
 
     irq_add_shared_handler(dma_get_irq_num(0), dma_irq_handler_tx, DMA_IRQ_PRIORITY);
     irq_set_enabled(dma_get_irq_num(0), true);
@@ -107,10 +113,10 @@ void setup()
 void loop() {
 	// uart_tx_program_puts(pio, sm, String(v).c_str());
     dma_channel_configure(dma_channel_tx, &config_tx, &pioTx->txf[smTx], &v, sizeof(v), true); // dma started    
-    dma_channel_wait_for_finish_blocking(dma_channel_tx);
+    // dma_channel_wait_for_finish_blocking(dma_channel_tx);
     v++;
     v = v % 255;
-	sleep_ms(100);
+	sleep_ms(1000);
 }
 
 PIO pioRx;
@@ -131,9 +137,11 @@ dma_channel_config config_rx_a,  config_rx_b;
 
 
 void setup1() {
-    bool success = pio_claim_free_sm_and_add_program_for_gpio_range(&uart_rx_program, &pioRx, &smRx, &offsetRx, RX_DATA_PIN, 1, true);
+    while(!Serial) {}
+    bool success = pio_claim_free_sm_and_add_program_for_gpio_range(&stream_rx_program, &pioRx, &smRx, &offsetRx, RX_DATA_PIN, 2, true);
 
-	uart_rx_program_init(pioRx, smRx, offsetRx, RX_DATA_PIN, BIT_RATE);
+	stream_rx_program_init(pioRx, smRx, offsetRx, RX_DATA_PIN, BIT_RATE);
+    Serial.printf("Rx prog: %d\n", success);
 
     // irq_add_shared_handler(pio_get_irq_num(pioRx, PIO_IRQ_TO_USE), pio_irq_handler, PIO_IRQ_PRIORITY);
     // pio_set_irqn_source_enabled(pioRx, PIO_IRQ_TO_USE, pio_get_rx_fifo_not_empty_interrupt_source(smRx), true);
@@ -206,13 +214,13 @@ void loop1() {
     uint32_t remaining = dma_channel_hw_addr(current_rx_dma)->transfer_count;
     uint32_t current_dma_pos = (RX_BUFFER_SIZE - remaining);
 
-    // Serial.printf("%d %d %d %d\n", current_rx_dma, remaining, current_dma_pos, last_dma_pos);
+    Serial.printf("%d %d %d %d\n", current_rx_dma, remaining, current_dma_pos, last_dma_pos);
     
         // Process new data
     while (last_dma_pos < current_dma_pos) {
         uint8_t data = curr_rx_buffer[last_dma_pos];
         last_dma_pos = last_dma_pos + 1;
-        // Serial.printf("Received: %d\n", data);
+        Serial.printf("Received: %d\n", data);
         if (data != lastRead+1) {
             Serial.printf("Error %d %d\n", data, lastRead);
         }
@@ -232,5 +240,5 @@ void loop1() {
 // for(int i=0; i<16; i++) Serial.printf("%d ", rx_buffer_b[i]);
 // Serial.printf("\n");
 
-    delay(20 + random(150));
+    delay(500);
 }
