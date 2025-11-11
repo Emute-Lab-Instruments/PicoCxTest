@@ -57,8 +57,8 @@ static inline void stream_tx_program_init(PIO pio, uint sm, uint offset, uint pi
     pio_gpio_init(pio, pin_tx);
     pio_gpio_init(pio, pin_frame);
     pio_sm_config c = stream_tx_program_get_default_config(offset);
-    // OUT shifts to right, no autopull
-    sm_config_set_out_shift(&c, true, false, 32);
+    // OUT shifts to right, autopull enabled
+    sm_config_set_out_shift(&c, true, true, 32);
     sm_config_set_out_pins(&c, pin_tx, 1);
     sm_config_set_sideset_pins(&c, pin_frame);
     // We only need TX, so get an 8-deep FIFO!

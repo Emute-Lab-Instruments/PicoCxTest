@@ -16,7 +16,8 @@
 bitloop:                   ; Shift out first 32 bits
     out pins, 1 side 0   [6]        ; Shift 1 bit from OSR to the first OUT pin
     jmp x-- bitloop side 0    ; Each loop iteration is 8 cycles.
-bitloop2:                   ; Second batch of 32 bits 
+
+bitloop2:                   ; Second batch of 32 bits, autopulled 
     out pins, 1 side 0   [6]        ; Shift 1 bit from OSR to the first OUT pin
     jmp y-- bitloop2 side 0    ; Each loop iteration is 8 cycles.
 
@@ -37,8 +38,8 @@ static inline void stream_tx_program_init(PIO pio, uint sm, uint offset, uint pi
 
     pio_sm_config c = stream_tx_program_get_default_config(offset);
 
-    // OUT shifts to right, no autopull
-    sm_config_set_out_shift(&c, true, false, 32);
+    // OUT shifts to right, autopull enabled
+    sm_config_set_out_shift(&c, true, true, 32);
 
     sm_config_set_out_pins(&c, pin_tx, 1);
     sm_config_set_sideset_pins(&c, pin_frame);
